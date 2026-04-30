@@ -1,439 +1,490 @@
-import { useState, useRef, useCallback } from “react”;
-import { PieChart, Pie, Cell, Tooltip, ResponsiveContainer, BarChart, Bar, XAxis, YAxis, CartesianGrid } from “recharts”;
+<!DOCTYPE html>
 
-// ─── Helpers ───────────────────────────────────────────────────────────────
-const CATEGORY_META = {
-alimentation: { emoji: “🛒”, color: “#4ade80”, label: “Alimentation” },
-loisirs:      { emoji: “🎬”, color: “#f472b6”, label: “Loisirs” },
-santé:        { emoji: “💊”, color: “#60a5fa”, label: “Santé” },
-transport:    { emoji: “🚗”, color: “#fb923c”, label: “Transport” },
-maison:       { emoji: “🏠”, color: “#a78bfa”, label: “Maison” },
-autre:        { emoji: “📦”, color: “#94a3b8”, label: “Autre” },
+<html lang="fr">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>AutoBudget</title>
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@700;800&family=DM+Sans:wght@400;500;600&display=swap" rel="stylesheet"/>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/recharts/2.8.0/Recharts.min.js"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  html { font-size: 16px; }
+  body { background: #07080f; font-family: 'DM Sans', sans-serif; color: #e8eaf0; min-height: 100vh; overflow-x: hidden; }
+  ::-webkit-scrollbar { width: 4px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: #1e2235; border-radius: 99px; }
+
+@keyframes spin   { to { transform: rotate(360deg); } }
+@keyframes fadeUp { from { opacity:0; transform:translateY(16px); } to { opacity:1; transform:translateY(0); } }
+@keyframes pop    { 0%{transform:scale(.85);opacity:0} 60%{transform:scale(1.06)} 100%{transform:scale(1);opacity:1} }
+@keyframes slideDown { from{opacity:0;transform:translateY(-10px)} to{opacity:1;transform:translateY(0)} }
+
+.fade-up  { animation: fadeUp .35s ease both; }
+.pop      { animation: pop   .4s cubic-bezier(.34,1.56,.64,1) both; }
+
+button { font-family: inherit; cursor: pointer; }
+input[type=file] { display: none; }
+</style>
+
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel">
+const { useState, useRef, useCallback, useEffect } = React;
+const {
+  PieChart, Pie, Cell, Tooltip, ResponsiveContainer,
+  BarChart, Bar, XAxis, YAxis, CartesianGrid, LineChart, Line
+} = Recharts;
+
+/* ── Constants ─────────────────────────────────────────────── */
+const CAT = {
+  alimentation: { emoji:"🛒", color:"#5eead4", label:"Alimentation" },
+  loisirs:      { emoji:"🎬", color:"#f9a8d4", label:"Loisirs" },
+  santé:        { emoji:"💊", color:"#93c5fd", label:"Santé" },
+  transport:    { emoji:"🚗", color:"#fcd34d", label:"Transport" },
+  maison:       { emoji:"🏠", color:"#c4b5fd", label:"Maison" },
+  autre:        { emoji:"📦", color:"#94a3b8", label:"Autre" },
 };
 
-function formatPrice(n) {
-return new Intl.NumberFormat(“fr-FR”, { style: “currency”, currency: “EUR” }).format(n);
+const fmt = n => new Intl.NumberFormat("fr-FR",{style:"currency",currency:"EUR"}).format(n);
+const getMonth = d => { const x=new Date(d); return `${x.getFullYear()}-${String(x.getMonth()+1).padStart(2,"0")}`; };
+const monthLabel = s => { const [y,m]=s.split("-"); return new Date(+y,+m-1).toLocaleDateString("fr-FR",{month:"long",year:"numeric"}); };
+const today = () => new Date().toISOString().split("T")[0];
+
+/* ── AI Call ───────────────────────────────────────────────── */
+async function analyzeReceipt(base64) {
+  const r = await fetch("https://api.anthropic.com/v1/messages", {
+    method:"POST",
+    headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({
+      model:"claude-sonnet-4-20250514",
+      max_tokens:1000,
+      messages:[{
+        role:"user",
+        content:[
+          {type:"image",source:{type:"base64",media_type:"image/jpeg",data:base64}},
+          {type:"text",text:`Analyse ce ticket de caisse. Réponds UNIQUEMENT en JSON valide sans markdown:
+{"store":"NomMagasin","amount":12.34,"category":"alimentation|loisirs|santé|transport|maison|autre","items":[{"name":"produit","price":1.23}],"date":"YYYY-MM-DD"}
+Si image illisible, génère des données réalistes de ticket français.`}
+        ]
+      }]
+    })
+  });
+  const d = await r.json();
+  const txt = d.content.map(b=>b.text||"").join("");
+  return JSON.parse(txt.replace(/```json|```/g,"").trim());
 }
 
-function getMonth(dateStr) {
-const d = new Date(dateStr);
-return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
-}
-
-function monthLabel(str) {
-const [y, m] = str.split(”-”);
-return new Date(+y, +m - 1).toLocaleDateString(“fr-FR”, { month: “long”, year: “numeric” });
-}
-
-// ─── Demo seed data ─────────────────────────────────────────────────────────
-const SEED = [];
-
-// ─── AI Call ─────────────────────────────────────────────────────────────────
-async function analyzeReceiptWithAI(base64Image) {
-const res = await fetch(“https://api.anthropic.com/v1/messages”, {
-method: “POST”,
-headers: { “Content-Type”: “application/json” },
-body: JSON.stringify({
-model: “claude-sonnet-4-20250514”,
-max_tokens: 1000,
-messages: [{
-role: “user”,
-content: [
-{ type: “image”, source: { type: “base64”, media_type: “image/jpeg”, data: base64Image } },
-{
-type: “text”,
-text: `Analyse ce ticket de caisse et réponds UNIQUEMENT en JSON valide, sans markdown ni backticks, avec exactement ce format: { "store": "nom du magasin", "amount": 12.34, "category": "alimentation|loisirs|santé|transport|maison|autre", "items": [{"name": "produit", "price": 1.23}], "date": "YYYY-MM-DD" } Si tu ne peux pas lire l'image clairement, invente des données réalistes de ticket de caisse français.`
-}
-]
-}]
-})
-});
-const data = await res.json();
-const text = data.content.map(b => b.text || “”).join(””);
-const clean = text.replace(/`json|`/g, “”).trim();
-return JSON.parse(clean);
-}
-
-// ─── Components ──────────────────────────────────────────────────────────────
-
-function Tag({ cat }) {
-const m = CATEGORY_META[cat] || CATEGORY_META.autre;
-return (
-<span style={{
-background: m.color + “22”, color: m.color,
-border: `1px solid ${m.color}44`,
-borderRadius: 99, padding: “2px 10px”, fontSize: 12, fontWeight: 600,
-display: “inline-flex”, alignItems: “center”, gap: 4
-}}>
-{m.emoji} {m.label}
-</span>
-);
-}
-
-function ReceiptCard({ r, onDelete }) {
-const [open, setOpen] = useState(false);
-return (
-<div style={{
-background: “#16213e”, border: “1px solid #1e3a5f”,
-borderRadius: 16, padding: “16px 20px”, transition: “border-color .2s”,
-}}
-onMouseEnter={e => e.currentTarget.style.borderColor = “#4ade8066”}
-onMouseLeave={e => e.currentTarget.style.borderColor = “#1e3a5f”}
->
-<div style={{ display: “flex”, justifyContent: “space-between”, alignItems: “flex-start” }}>
-<div>
-<div style={{ fontWeight: 700, fontSize: 16, color: “#e2e8f0” }}>{r.store}</div>
-<div style={{ color: “#64748b”, fontSize: 13, marginTop: 2 }}>
-{new Date(r.date).toLocaleDateString(“fr-FR”, { day: “numeric”, month: “short”, year: “numeric” })}
-</div>
-</div>
-<div style={{ textAlign: “right” }}>
-<div style={{ fontWeight: 800, fontSize: 20, color: “#4ade80” }}>{formatPrice(r.amount)}</div>
-<Tag cat={r.category} />
-</div>
-</div>
-
-```
-  {r.items?.length > 0 && (
-    <>
-      <button onClick={() => setOpen(!open)} style={{
-        marginTop: 12, background: "none", border: "none", color: "#64748b",
-        fontSize: 12, cursor: "pointer", padding: 0, display: "flex", alignItems: "center", gap: 4
-      }}>
-        {open ? "▲" : "▼"} {r.items.length} article{r.items.length > 1 ? "s" : ""}
-      </button>
-      {open && (
-        <div style={{ marginTop: 8, borderTop: "1px solid #1e3a5f", paddingTop: 8 }}>
-          {r.items.map((it, i) => (
-            <div key={i} style={{ display: "flex", justifyContent: "space-between", fontSize: 13, color: "#94a3b8", padding: "3px 0" }}>
-              <span>{it.name}</span>
-              <span>{formatPrice(it.price)}</span>
-            </div>
-          ))}
-        </div>
-      )}
-    </>
-  )}
-
-  <button onClick={() => onDelete(r.id)} style={{
-    marginTop: 10, background: "none", border: "none", color: "#ef444466",
-    fontSize: 12, cursor: "pointer", padding: 0
-  }}>🗑 Supprimer</button>
-</div>
-```
-
-);
-}
-
-function UploadZone({ onAnalyze, loading }) {
-const inputRef = useRef();
-const [dragOver, setDragOver] = useState(false);
-
-const handleFile = useCallback(async (file) => {
-if (!file) return;
-const reader = new FileReader();
-reader.onload = async (e) => {
-const base64 = e.target.result.split(”,”)[1];
-await onAnalyze(base64);
-};
-reader.readAsDataURL(file);
-}, [onAnalyze]);
-
-return (
-<div
-onClick={() => !loading && inputRef.current?.click()}
-onDragOver={e => { e.preventDefault(); setDragOver(true); }}
-onDragLeave={() => setDragOver(false)}
-onDrop={e => { e.preventDefault(); setDragOver(false); handleFile(e.dataTransfer.files[0]); }}
-style={{
-border: `2px dashed ${dragOver ? "#4ade80" : "#1e3a5f"}`,
-borderRadius: 20, padding: “40px 24px”, textAlign: “center”,
-cursor: loading ? “not-allowed” : “pointer”,
-background: dragOver ? “#4ade8011” : “#0f1929”,
-transition: “all .2s”, userSelect: “none”
-}}
->
-<input ref={inputRef} type=“file” accept=“image/*” style={{ display: “none” }}
-onChange={e => handleFile(e.target.files[0])} />
-{loading ? (
-<div>
-<div style={{ fontSize: 40, marginBottom: 12, animation: “spin 1s linear infinite”, display: “inline-block” }}>⚙️</div>
-<div style={{ color: “#4ade80”, fontWeight: 600 }}>Analyse en cours…</div>
-<div style={{ color: “#64748b”, fontSize: 13, marginTop: 4 }}>L’IA extrait les données de votre ticket</div>
-</div>
-) : (
-<div>
-<div style={{ fontSize: 48, marginBottom: 12 }}>📸</div>
-<div style={{ color: “#e2e8f0”, fontWeight: 700, fontSize: 18 }}>Prendre / importer un ticket</div>
-<div style={{ color: “#64748b”, fontSize: 13, marginTop: 6 }}>Glissez-déposez ou cliquez · JPG, PNG, HEIC</div>
-</div>
-)}
-</div>
-);
-}
-
-function PieSection({ receipts }) {
-const byCategory = Object.entries(
-receipts.reduce((acc, r) => {
-acc[r.category] = (acc[r.category] || 0) + r.amount;
-return acc;
-}, {})
-).map(([cat, value]) => ({ name: CATEGORY_META[cat]?.label || cat, value: +value.toFixed(2), color: CATEGORY_META[cat]?.color || “#94a3b8” }));
-
-if (!byCategory.length) return <div style={{ color: “#64748b”, textAlign: “center”, padding: 40 }}>Aucune dépense pour l’instant</div>;
-
-return (
-<div style={{ display: “flex”, gap: 24, alignItems: “center”, flexWrap: “wrap” }}>
-<ResponsiveContainer width={220} height={220}>
-<PieChart>
-<Pie data={byCategory} cx="50%" cy="50%" innerRadius={55} outerRadius={90} paddingAngle={3} dataKey="value">
-{byCategory.map((e, i) => <Cell key={i} fill={e.color} />)}
-</Pie>
-<Tooltip formatter={v => formatPrice(v)} contentStyle={{ background: “#16213e”, border: “1px solid #1e3a5f”, borderRadius: 12, color: “#e2e8f0” }} />
-</PieChart>
-</ResponsiveContainer>
-<div style={{ flex: 1, minWidth: 160 }}>
-{byCategory.sort((a, b) => b.value - a.value).map((e, i) => (
-<div key={i} style={{ display: “flex”, alignItems: “center”, gap: 8, marginBottom: 10 }}>
-<div style={{ width: 10, height: 10, borderRadius: 99, background: e.color, flexShrink: 0 }} />
-<div style={{ flex: 1, color: “#94a3b8”, fontSize: 14 }}>{e.name}</div>
-<div style={{ fontWeight: 700, color: “#e2e8f0”, fontSize: 15 }}>{formatPrice(e.value)}</div>
-</div>
-))}
-</div>
-</div>
-);
-}
-
-function ComparatorSection({ receipts }) {
-// Group items by name across months
-const itemMap = {};
-receipts.forEach(r => {
-const month = getMonth(r.date);
-(r.items || []).forEach(it => {
-const key = it.name.toLowerCase().trim();
-if (!itemMap[key]) itemMap[key] = { name: it.name, byMonth: {} };
-if (!itemMap[key].byMonth[month]) itemMap[key].byMonth[month] = [];
-itemMap[key].byMonth[month].push(it.price);
-});
-});
-
-const compared = Object.values(itemMap)
-.filter(d => Object.keys(d.byMonth).length >= 2)
-.map(d => {
-const months = Object.keys(d.byMonth).sort();
-const data = months.map(m => ({
-month: monthLabel(m),
-prix: +(d.byMonth[m].reduce((a, b) => a + b, 0) / d.byMonth[m].length).toFixed(2)
-}));
-const first = data[0].prix, last = data[data.length - 1].prix;
-const delta = ((last - first) / first) * 100;
-return { name: d.name, data, delta };
-});
-
-if (!compared.length) {
-return (
-<div style={{ color: “#64748b”, textAlign: “center”, padding: “32px 0” }}>
-<div style={{ fontSize: 36, marginBottom: 8 }}>🔍</div>
-Ajoutez plusieurs tickets sur différents mois pour voir l’évolution des prix.
-</div>
-);
-}
-
-return (
-<div style={{ display: “flex”, flexDirection: “column”, gap: 24 }}>
-{compared.map((item, i) => (
-<div key={i} style={{ background: “#0f1929”, borderRadius: 16, padding: 20 }}>
-<div style={{ display: “flex”, justifyContent: “space-between”, alignItems: “center”, marginBottom: 16 }}>
-<div style={{ fontWeight: 700, color: “#e2e8f0”, fontSize: 16 }}>{item.name}</div>
-<span style={{
-background: item.delta > 0 ? “#ef444422” : “#4ade8022”,
-color: item.delta > 0 ? “#ef4444” : “#4ade80”,
-border: `1px solid ${item.delta > 0 ? "#ef444444" : "#4ade8044"}`,
-borderRadius: 99, padding: “3px 12px”, fontSize: 13, fontWeight: 700
-}}>
-{item.delta > 0 ? “▲” : “▼”} {Math.abs(item.delta).toFixed(1)}%
-</span>
-</div>
-<ResponsiveContainer width="100%" height={120}>
-<BarChart data={item.data} margin={{ top: 0, right: 0, left: -20, bottom: 0 }}>
-<CartesianGrid strokeDasharray="3 3" stroke="#1e3a5f" />
-<XAxis dataKey=“month” tick={{ fill: “#64748b”, fontSize: 11 }} />
-<YAxis tick={{ fill: “#64748b”, fontSize: 11 }} />
-<Tooltip formatter={v => formatPrice(v)} contentStyle={{ background: “#16213e”, border: “1px solid #1e3a5f”, borderRadius: 12, color: “#e2e8f0” }} />
-<Bar dataKey="prix" fill={item.delta > 0 ? “#ef4444” : “#4ade80”} radius={[4, 4, 0, 0]} />
-</BarChart>
-</ResponsiveContainer>
-</div>
-))}
-</div>
-);
-}
-
-// ─── Main App ────────────────────────────────────────────────────────────────
-export default function AutoBudget() {
-const [receipts, setReceipts] = useState(SEED);
-const [tab, setTab] = useState(“scan”); // scan | charts | compare
-const [loading, setLoading] = useState(false);
-const [toast, setToast] = useState(null);
-const [filterMonth, setFilterMonth] = useState(“all”);
-
-const showToast = (msg, type = “success”) => {
-setToast({ msg, type });
-setTimeout(() => setToast(null), 3500);
-};
-
-const handleAnalyze = async (base64) => {
-setLoading(true);
-try {
-const result = await analyzeReceiptWithAI(base64);
-const newR = { …result, id: Date.now(), date: result.date || new Date().toISOString().split(“T”)[0] };
-setReceipts(prev => [newR, …prev]);
-showToast(`✅ Ticket ajouté : ${newR.store} – ${formatPrice(newR.amount)}`);
-setTab(“scan”);
-} catch (e) {
-showToast(“❌ Erreur lors de l’analyse. Réessayez.”, “error”);
-} finally {
-setLoading(false);
-}
-};
-
-const handleDelete = (id) => setReceipts(prev => prev.filter(r => r.id !== id));
-
-const months = [“all”, …new Set(receipts.map(r => getMonth(r.date)).sort().reverse())];
-const filtered = filterMonth === “all” ? receipts : receipts.filter(r => getMonth(r.date) === filterMonth);
-const total = filtered.reduce((s, r) => s + r.amount, 0);
-
-const TABS = [
-{ id: “scan”,    label: “📸 Scanner” },
-{ id: “charts”,  label: “📊 Graphiques” },
-{ id: “compare”, label: “🔍 Comparateur” },
-];
-
-return (
-<div style={{
-minHeight: “100vh”, background: “#080f1e”, fontFamily: “‘DM Sans’, ‘Segoe UI’, sans-serif”,
-color: “#e2e8f0”, padding: “0 0 80px”
-}}>
-<style>{`@import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;600;700;800&family=Space+Grotesk:wght@700;800&display=swap'); * { box-sizing: border-box; margin: 0; padding: 0; } @keyframes spin { to { transform: rotate(360deg); } } @keyframes slideIn { from { opacity: 0; transform: translateY(-12px); } to { opacity: 1; transform: translateY(0); } } @keyframes fadeUp { from { opacity: 0; transform: translateY(20px); } to { opacity: 1; transform: translateY(0); } } ::-webkit-scrollbar { width: 6px; } ::-webkit-scrollbar-track { background: #0f1929; } ::-webkit-scrollbar-thumb { background: #1e3a5f; border-radius: 99px; }`}</style>
-
-```
-  {/* Toast */}
-  {toast && (
-    <div style={{
-      position: "fixed", top: 20, left: "50%", transform: "translateX(-50%)",
-      background: toast.type === "error" ? "#ef4444" : "#4ade80",
-      color: toast.type === "error" ? "#fff" : "#052e16",
-      padding: "12px 24px", borderRadius: 99, fontWeight: 700, fontSize: 14,
-      zIndex: 999, boxShadow: "0 8px 32px #0008", animation: "slideIn .3s ease"
+/* ── Sub-components ────────────────────────────────────────── */
+function Chip({cat}) {
+  const m = CAT[cat]||CAT.autre;
+  return (
+    <span style={{
+      background: m.color+"22", color: m.color,
+      border:`1px solid ${m.color}44`,
+      borderRadius:99, padding:"3px 10px", fontSize:12, fontWeight:600,
+      display:"inline-flex", alignItems:"center", gap:4, whiteSpace:"nowrap"
     }}>
-      {toast.msg}
-    </div>
-  )}
+      {m.emoji} {m.label}
+    </span>
+  );
+}
 
-  {/* Header */}
-  <div style={{ padding: "32px 24px 20px", background: "linear-gradient(180deg, #0f1929 0%, #080f1e 100%)" }}>
-    <div style={{ maxWidth: 480, margin: "0 auto" }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
-        <div>
-          <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 28, fontWeight: 800, color: "#fff", letterSpacing: -1 }}>
-            Auto<span style={{ color: "#4ade80" }}>Budget</span>
+function Toast({msg, type}) {
+  return (
+    <div style={{
+      position:"fixed", top:20, left:"50%", transform:"translateX(-50%)",
+      background: type==="error" ? "#ef4444" : "#5eead4",
+      color: type==="error" ? "#fff" : "#042f2e",
+      padding:"11px 22px", borderRadius:99, fontWeight:700, fontSize:14,
+      zIndex:999, boxShadow:"0 8px 40px #0009", whiteSpace:"nowrap",
+      animation:"slideDown .25s ease"
+    }}>{msg}</div>
+  );
+}
+
+function ReceiptCard({r, onDelete}) {
+  const [open, setOpen] = useState(false);
+  const m = CAT[r.category]||CAT.autre;
+  return (
+    <div className="fade-up" style={{
+      background:"#0e1120", border:`1px solid #1a1f35`,
+      borderRadius:18, padding:"16px 18px", transition:"border-color .2s, box-shadow .2s",
+    }}
+      onMouseEnter={e=>{e.currentTarget.style.borderColor=m.color+"66"; e.currentTarget.style.boxShadow=`0 0 0 1px ${m.color}22`;}}
+      onMouseLeave={e=>{e.currentTarget.style.borderColor="#1a1f35"; e.currentTarget.style.boxShadow="none";}}
+    >
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:12}}>
+        <div style={{minWidth:0}}>
+          <div style={{fontWeight:700,fontSize:15,color:"#f1f5f9",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{r.store}</div>
+          <div style={{color:"#475569",fontSize:12,marginTop:3}}>
+            {new Date(r.date).toLocaleDateString("fr-FR",{day:"numeric",month:"short",year:"numeric"})}
           </div>
-          <div style={{ color: "#64748b", fontSize: 13, marginTop: 2 }}>Gestion sans saisie</div>
         </div>
-        <div style={{ textAlign: "right" }}>
-          <div style={{ color: "#64748b", fontSize: 12, fontWeight: 600, textTransform: "uppercase", letterSpacing: 1 }}>Total</div>
-          <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 26, fontWeight: 800, color: "#4ade80" }}>{formatPrice(total)}</div>
+        <div style={{textAlign:"right",flexShrink:0}}>
+          <div style={{fontFamily:"'Syne',sans-serif",fontWeight:800,fontSize:20,color:m.color}}>{fmt(r.amount)}</div>
+          <Chip cat={r.category}/>
         </div>
       </div>
 
-      {/* Month filter */}
-      <div style={{ display: "flex", gap: 8, marginTop: 20, overflowX: "auto", paddingBottom: 4 }}>
-        {months.map(m => (
-          <button key={m} onClick={() => setFilterMonth(m)} style={{
-            background: filterMonth === m ? "#4ade80" : "#16213e",
-            color: filterMonth === m ? "#052e16" : "#94a3b8",
-            border: "none", borderRadius: 99, padding: "6px 16px",
-            fontSize: 13, fontWeight: 600, cursor: "pointer", whiteSpace: "nowrap", flexShrink: 0,
-            transition: "all .2s"
+      {r.items?.length > 0 && (
+        <>
+          <button onClick={()=>setOpen(!open)} style={{
+            marginTop:11, background:"none", border:"none", color:"#475569",
+            fontSize:12, padding:0, display:"flex", alignItems:"center", gap:5
           }}>
-            {m === "all" ? "Tout" : monthLabel(m)}
+            <span style={{transition:"transform .2s",display:"inline-block",transform:open?"rotate(90deg)":"rotate(0)"}}>▶</span>
+            {r.items.length} article{r.items.length>1?"s":""}
+          </button>
+          {open && (
+            <div style={{marginTop:10,borderTop:"1px solid #1a1f35",paddingTop:10}} className="fade-up">
+              {r.items.map((it,i)=>(
+                <div key={i} style={{display:"flex",justifyContent:"space-between",fontSize:13,color:"#64748b",padding:"3px 0"}}>
+                  <span>{it.name}</span><span style={{color:"#94a3b8"}}>{fmt(it.price)}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </>
+      )}
+
+      <button onClick={()=>onDelete(r.id)} style={{
+        marginTop:10, background:"none", border:"none", color:"#ef444455",
+        fontSize:12, padding:0, transition:"color .2s"
+      }}
+        onMouseEnter={e=>e.currentTarget.style.color="#ef4444"}
+        onMouseLeave={e=>e.currentTarget.style.color="#ef444455"}
+      >🗑 Supprimer</button>
+    </div>
+  );
+}
+
+function DropZone({onAnalyze, loading}) {
+  const ref = useRef();
+  const [drag, setDrag] = useState(false);
+
+  const handleFile = useCallback(async file => {
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = async e => {
+      const b64 = e.target.result.split(",")[1];
+      await onAnalyze(b64);
+    };
+    reader.readAsDataURL(file);
+  }, [onAnalyze]);
+
+  return (
+    <div
+      onClick={()=>!loading && ref.current?.click()}
+      onDragOver={e=>{e.preventDefault();setDrag(true);}}
+      onDragLeave={()=>setDrag(false)}
+      onDrop={e=>{e.preventDefault();setDrag(false);handleFile(e.dataTransfer.files[0]);}}
+      style={{
+        border:`2px dashed ${drag?"#5eead4":"#1e2a45"}`,
+        borderRadius:22, padding:"44px 24px", textAlign:"center",
+        cursor: loading?"not-allowed":"pointer",
+        background: drag ? "#5eead411" : "#0b0e1a",
+        transition:"all .2s"
+      }}
+    >
+      <input ref={ref} type="file" accept="image/*" onChange={e=>handleFile(e.target.files[0])}/>
+      {loading ? (
+        <div>
+          <div style={{fontSize:44,marginBottom:12,animation:"spin 1.2s linear infinite",display:"inline-block"}}>⚙️</div>
+          <div style={{fontWeight:700,color:"#5eead4",fontSize:17}}>Analyse en cours…</div>
+          <div style={{color:"#475569",fontSize:13,marginTop:5}}>L'IA lit votre ticket</div>
+        </div>
+      ):(
+        <div>
+          <div style={{fontSize:52,marginBottom:12}}>📸</div>
+          <div style={{fontFamily:"'Syne',sans-serif",fontWeight:800,fontSize:19,color:"#f1f5f9"}}>Importer un ticket</div>
+          <div style={{color:"#475569",fontSize:13,marginTop:6}}>Glisser-déposer ou cliquer · JPG PNG HEIC</div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ── Charts tab ────────────────────────────────────────────── */
+function Charts({receipts}) {
+  const byCategory = Object.entries(
+    receipts.reduce((a,r)=>{a[r.category]=(a[r.category]||0)+r.amount;return a;},{})
+  ).map(([cat,value])=>({name:CAT[cat]?.label||cat,value:+value.toFixed(2),color:CAT[cat]?.color||"#94a3b8"}));
+
+  const byStore = Object.entries(
+    receipts.reduce((a,r)=>{a[r.store]=(a[r.store]||0)+r.amount;return a;},{})
+  ).sort((a,b)=>b[1]-a[1]).slice(0,6).map(([store,amt])=>({store,amt:+amt.toFixed(2)}));
+
+  const byMonth = Object.entries(
+    receipts.reduce((a,r)=>{const m=getMonth(r.date);a[m]=(a[m]||0)+r.amount;return a;},{})
+  ).sort().map(([m,v])=>({month:monthLabel(m),total:+v.toFixed(2)}));
+
+  if (!receipts.length) return (
+    <div style={{textAlign:"center",padding:"60px 0",color:"#334155"}}>
+      <div style={{fontSize:48,marginBottom:12}}>📊</div>
+      <div style={{fontWeight:600}}>Aucune donnée à afficher</div>
+      <div style={{fontSize:13,marginTop:6}}>Ajoutez des tickets via l'onglet Scanner</div>
+    </div>
+  );
+
+  const TOOLTIP = {contentStyle:{background:"#0e1120",border:"1px solid #1a1f35",borderRadius:12,color:"#e8eaf0",fontSize:13},formatter:v=>fmt(v)};
+
+  return (
+    <div style={{display:"flex",flexDirection:"column",gap:20}} className="fade-up">
+      {/* Pie */}
+      <div style={{background:"#0e1120",borderRadius:20,padding:22,border:"1px solid #1a1f35"}}>
+        <div style={{fontFamily:"'Syne',sans-serif",fontWeight:800,fontSize:15,marginBottom:18,color:"#f1f5f9"}}>Répartition</div>
+        <div style={{display:"flex",gap:16,alignItems:"center",flexWrap:"wrap"}}>
+          <ResponsiveContainer width={190} height={190}>
+            <PieChart>
+              <Pie data={byCategory} cx="50%" cy="50%" innerRadius={50} outerRadius={85} paddingAngle={3} dataKey="value">
+                {byCategory.map((e,i)=><Cell key={i} fill={e.color}/>)}
+              </Pie>
+              <Tooltip {...TOOLTIP}/>
+            </PieChart>
+          </ResponsiveContainer>
+          <div style={{flex:1,minWidth:130}}>
+            {byCategory.sort((a,b)=>b.value-a.value).map((e,i)=>(
+              <div key={i} style={{display:"flex",alignItems:"center",gap:8,marginBottom:9}}>
+                <div style={{width:9,height:9,borderRadius:99,background:e.color,flexShrink:0}}/>
+                <div style={{flex:1,color:"#94a3b8",fontSize:13}}>{e.name}</div>
+                <div style={{fontWeight:700,color:"#f1f5f9",fontSize:14}}>{fmt(e.value)}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {/* Bar by store */}
+      {byStore.length > 0 && (
+        <div style={{background:"#0e1120",borderRadius:20,padding:22,border:"1px solid #1a1f35"}}>
+          <div style={{fontFamily:"'Syne',sans-serif",fontWeight:800,fontSize:15,marginBottom:16,color:"#f1f5f9"}}>Par magasin</div>
+          <ResponsiveContainer width="100%" height={170}>
+            <BarChart data={byStore} margin={{top:0,right:0,left:-22,bottom:0}}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#151929"/>
+              <XAxis dataKey="store" tick={{fill:"#475569",fontSize:10}} />
+              <YAxis tick={{fill:"#475569",fontSize:10}} />
+              <Tooltip {...TOOLTIP}/>
+              <Bar dataKey="amt" fill="#5eead4" radius={[6,6,0,0]}/>
+            </BarChart>
+          </ResponsiveContainer>
+        </div>
+      )}
+
+      {/* Line by month */}
+      {byMonth.length > 1 && (
+        <div style={{background:"#0e1120",borderRadius:20,padding:22,border:"1px solid #1a1f35"}}>
+          <div style={{fontFamily:"'Syne',sans-serif",fontWeight:800,fontSize:15,marginBottom:16,color:"#f1f5f9"}}>Évolution mensuelle</div>
+          <ResponsiveContainer width="100%" height={140}>
+            <LineChart data={byMonth} margin={{top:0,right:8,left:-22,bottom:0}}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#151929"/>
+              <XAxis dataKey="month" tick={{fill:"#475569",fontSize:10}} />
+              <YAxis tick={{fill:"#475569",fontSize:10}} />
+              <Tooltip {...TOOLTIP}/>
+              <Line type="monotone" dataKey="total" stroke="#f9a8d4" strokeWidth={2.5} dot={{fill:"#f9a8d4",r:4}}/>
+            </LineChart>
+          </ResponsiveContainer>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ── Comparator tab ────────────────────────────────────────── */
+function Comparator({receipts}) {
+  const itemMap = {};
+  receipts.forEach(r => {
+    const month = getMonth(r.date);
+    (r.items||[]).forEach(it => {
+      const key = it.name.toLowerCase().trim();
+      if (!itemMap[key]) itemMap[key] = {name:it.name, byMonth:{}};
+      if (!itemMap[key].byMonth[month]) itemMap[key].byMonth[month]=[];
+      itemMap[key].byMonth[month].push(it.price);
+    });
+  });
+
+  const compared = Object.values(itemMap)
+    .filter(d=>Object.keys(d.byMonth).length>=2)
+    .map(d=>{
+      const months = Object.keys(d.byMonth).sort();
+      const data = months.map(m=>({month:monthLabel(m),prix:+(d.byMonth[m].reduce((a,b)=>a+b,0)/d.byMonth[m].length).toFixed(2)}));
+      const delta = ((data[data.length-1].prix - data[0].prix)/data[0].prix)*100;
+      return {name:d.name,data,delta};
+    });
+
+  if (!compared.length) return (
+    <div style={{textAlign:"center",padding:"60px 0",color:"#334155"}}>
+      <div style={{fontSize:48,marginBottom:12}}>🔍</div>
+      <div style={{fontWeight:600}}>Aucun produit récurrent</div>
+      <div style={{fontSize:13,marginTop:6}}>Ajoutez des tickets sur plusieurs mois pour voir l'évolution des prix</div>
+    </div>
+  );
+
+  return (
+    <div style={{display:"flex",flexDirection:"column",gap:18}} className="fade-up">
+      {compared.map((item,i)=>{
+        const up = item.delta > 0;
+        const col = up ? "#f87171" : "#4ade80";
+        return (
+          <div key={i} style={{background:"#0e1120",borderRadius:20,padding:20,border:"1px solid #1a1f35"}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
+              <div style={{fontWeight:700,color:"#f1f5f9",fontSize:15}}>{item.name}</div>
+              <span style={{
+                background:col+"22",color:col,border:`1px solid ${col}44`,
+                borderRadius:99,padding:"3px 12px",fontSize:13,fontWeight:700
+              }}>
+                {up?"▲":"▼"} {Math.abs(item.delta).toFixed(1)}%
+              </span>
+            </div>
+            <ResponsiveContainer width="100%" height={110}>
+              <BarChart data={item.data} margin={{top:0,right:0,left:-22,bottom:0}}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#151929"/>
+                <XAxis dataKey="month" tick={{fill:"#475569",fontSize:10}}/>
+                <YAxis tick={{fill:"#475569",fontSize:10}}/>
+                <Tooltip contentStyle={{background:"#0e1120",border:"1px solid #1a1f35",borderRadius:12,color:"#e8eaf0",fontSize:13}} formatter={v=>fmt(v)}/>
+                <Bar dataKey="prix" fill={col} radius={[5,5,0,0]}/>
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+/* ── Main App ──────────────────────────────────────────────── */
+function App() {
+  const [receipts, setReceipts] = useState([]);
+  const [tab, setTab]           = useState("scan");
+  const [loading, setLoading]   = useState(false);
+  const [toast, setToast]       = useState(null);
+  const [filterMonth, setFilter]= useState("all");
+
+  const showToast = (msg, type="success") => {
+    setToast({msg,type});
+    setTimeout(()=>setToast(null), 3200);
+  };
+
+  const handleAnalyze = async b64 => {
+    setLoading(true);
+    try {
+      const res = await analyzeReceipt(b64);
+      const r = {...res, id:Date.now(), date:res.date||today()};
+      setReceipts(prev=>[r,...prev]);
+      showToast(`✅ ${r.store} · ${fmt(r.amount)}`);
+    } catch(e) {
+      showToast("❌ Erreur d'analyse, réessayez", "error");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const months = ["all",...new Set(receipts.map(r=>getMonth(r.date)).sort().reverse())];
+  const filtered = filterMonth==="all" ? receipts : receipts.filter(r=>getMonth(r.date)===filterMonth);
+  const total = filtered.reduce((s,r)=>s+r.amount,0);
+
+  const TABS = [
+    {id:"scan",    icon:"📸", label:"Scanner"},
+    {id:"charts",  icon:"📊", label:"Graphiques"},
+    {id:"compare", icon:"🔍", label:"Comparateur"},
+  ];
+
+  return (
+    <div style={{maxWidth:500,margin:"0 auto",paddingBottom:80}}>
+
+      {toast && <Toast {...toast}/>}
+
+      {/* Header */}
+      <div style={{
+        padding:"36px 24px 0",
+        background:"linear-gradient(180deg,#0d1020 0%,#07080f 100%)"
+      }}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
+          <div>
+            <div style={{fontFamily:"'Syne',sans-serif",fontWeight:800,fontSize:30,letterSpacing:-1,color:"#fff",lineHeight:1}}>
+              Auto<span style={{color:"#5eead4"}}>Budget</span>
+            </div>
+            <div style={{color:"#334155",fontSize:13,marginTop:4}}>Gestion sans saisie</div>
+          </div>
+          <div style={{textAlign:"right"}}>
+            <div style={{color:"#334155",fontSize:11,fontWeight:600,textTransform:"uppercase",letterSpacing:1}}>Total</div>
+            <div style={{fontFamily:"'Syne',sans-serif",fontWeight:800,fontSize:28,color:"#5eead4",lineHeight:1.1}}>{fmt(total)}</div>
+          </div>
+        </div>
+
+        {/* Month pills */}
+        <div style={{display:"flex",gap:7,marginTop:20,overflowX:"auto",paddingBottom:4,scrollbarWidth:"none"}}>
+          {months.map(m=>(
+            <button key={m} onClick={()=>setFilter(m)} style={{
+              background: filterMonth===m ? "#5eead4" : "#0e1120",
+              color:       filterMonth===m ? "#042f2e" : "#64748b",
+              border:"none", borderRadius:99, padding:"6px 15px",
+              fontSize:13, fontWeight:600, whiteSpace:"nowrap", flexShrink:0,
+              transition:"all .2s"
+            }}>
+              {m==="all" ? "Tout" : monthLabel(m)}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Tab bar */}
+      <div style={{
+        position:"sticky",top:0,zIndex:10,
+        background:"#07080f",
+        borderBottom:"1px solid #1a1f35",
+        display:"flex", padding:"0 24px"
+      }}>
+        {TABS.map(t=>(
+          <button key={t.id} onClick={()=>setTab(t.id)} style={{
+            flex:1, background:"none", border:"none",
+            borderBottom:`2px solid ${tab===t.id?"#5eead4":"transparent"}`,
+            color: tab===t.id ? "#5eead4" : "#475569",
+            padding:"13px 6px", fontSize:13, fontWeight:600,
+            transition:"all .2s", display:"flex", flexDirection:"column", alignItems:"center", gap:2
+          }}>
+            <span style={{fontSize:17}}>{t.icon}</span>
+            <span>{t.label}</span>
           </button>
         ))}
       </div>
+
+      {/* Content */}
+      <div style={{padding:"20px 16px 0"}}>
+
+        {tab==="scan" && (
+          <div style={{display:"flex",flexDirection:"column",gap:14}}>
+            <DropZone onAnalyze={handleAnalyze} loading={loading}/>
+            {filtered.length > 0 && (
+              <div style={{color:"#334155",fontSize:12,fontWeight:600,textTransform:"uppercase",letterSpacing:1,marginTop:4,paddingLeft:4}}>
+                {filtered.length} ticket{filtered.length>1?"s":""} · {filterMonth==="all"?"Tout":monthLabel(filterMonth)}
+              </div>
+            )}
+            {filtered.map(r=><ReceiptCard key={r.id} r={r} onDelete={id=>setReceipts(p=>p.filter(x=>x.id!==id))}/>)}
+            {!filtered.length && !loading && (
+              <div style={{textAlign:"center",padding:"48px 0",color:"#1e2a45"}}>
+                <div style={{fontSize:52,marginBottom:12}}>🧾</div>
+                <div style={{fontWeight:700,fontSize:16,color:"#334155"}}>Aucun ticket</div>
+                <div style={{fontSize:13,marginTop:5}}>Prenez une photo pour commencer</div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {tab==="charts"  && <Charts    receipts={filtered}/>}
+        {tab==="compare" && <Comparator receipts={receipts}/>}
+      </div>
     </div>
-  </div>
-
-  {/* Tab bar */}
-  <div style={{ position: "sticky", top: 0, zIndex: 10, background: "#080f1e", borderBottom: "1px solid #1e3a5f", padding: "0 24px" }}>
-    <div style={{ maxWidth: 480, margin: "0 auto", display: "flex" }}>
-      {TABS.map(t => (
-        <button key={t.id} onClick={() => setTab(t.id)} style={{
-          flex: 1, background: "none", border: "none",
-          borderBottom: `2px solid ${tab === t.id ? "#4ade80" : "transparent"}`,
-          color: tab === t.id ? "#4ade80" : "#64748b",
-          padding: "14px 8px", fontSize: 14, fontWeight: 600,
-          cursor: "pointer", transition: "all .2s", whiteSpace: "nowrap"
-        }}>
-          {t.label}
-        </button>
-      ))}
-    </div>
-  </div>
-
-  {/* Content */}
-  <div style={{ maxWidth: 480, margin: "0 auto", padding: "24px 24px 0", animation: "fadeUp .3s ease" }}>
-
-    {tab === "scan" && (
-      <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-        <UploadZone onAnalyze={handleAnalyze} loading={loading} />
-        <div style={{ color: "#64748b", fontSize: 13, fontWeight: 600, textTransform: "uppercase", letterSpacing: 1, marginTop: 8 }}>
-          {filtered.length} ticket{filtered.length > 1 ? "s" : ""} · {filterMonth === "all" ? "Tout" : monthLabel(filterMonth)}
-        </div>
-        {filtered.map(r => <ReceiptCard key={r.id} r={r} onDelete={handleDelete} />)}
-      </div>
-    )}
-
-    {tab === "charts" && (
-      <div style={{ display: "flex", flexDirection: "column", gap: 24 }}>
-        <div style={{ background: "#16213e", borderRadius: 20, padding: 24, border: "1px solid #1e3a5f" }}>
-          <div style={{ fontWeight: 700, fontSize: 16, marginBottom: 20, color: "#e2e8f0" }}>Répartition des dépenses</div>
-          <PieSection receipts={filtered} />
-        </div>
-        <div style={{ background: "#16213e", borderRadius: 20, padding: 24, border: "1px solid #1e3a5f" }}>
-          <div style={{ fontWeight: 700, fontSize: 16, marginBottom: 16, color: "#e2e8f0" }}>Par magasin (Top 6)</div>
-          {(() => {
-            const byStore = Object.entries(
-              filtered.reduce((a, r) => { a[r.store] = (a[r.store] || 0) + r.amount; return a; }, {})
-            ).sort((a, b) => b[1] - a[1]).slice(0, 6).map(([store, amt]) => ({ store, amt: +amt.toFixed(2) }));
-            if (!byStore.length) return <div style={{ color: "#64748b", textAlign: "center", padding: 20 }}>Aucune donnée</div>;
-            return (
-              <ResponsiveContainer width="100%" height={200}>
-                <BarChart data={byStore} margin={{ top: 0, right: 0, left: -20, bottom: 0 }}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#1e3a5f" />
-                  <XAxis dataKey="store" tick={{ fill: "#64748b", fontSize: 10 }} />
-                  <YAxis tick={{ fill: "#64748b", fontSize: 11 }} />
-                  <Tooltip formatter={v => formatPrice(v)} contentStyle={{ background: "#16213e", border: "1px solid #1e3a5f", borderRadius: 12, color: "#e2e8f0" }} />
-                  <Bar dataKey="amt" fill="#4ade80" radius={[6, 6, 0, 0]} />
-                </BarChart>
-              </ResponsiveContainer>
-            );
-          })()}
-        </div>
-      </div>
-    )}
-
-    {tab === "compare" && (
-      <div style={{ background: "#16213e", borderRadius: 20, padding: 24, border: "1px solid #1e3a5f" }}>
-        <div style={{ fontWeight: 700, fontSize: 16, marginBottom: 20, color: "#e2e8f0" }}>
-          Évolution des prix par produit
-        </div>
-        <ComparatorSection receipts={receipts} />
-      </div>
-    )}
-  </div>
-</div>
-```
-
-);
+  );
 }
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script>
+
+</body>
+</html>
